@@ -1,10 +1,23 @@
 import os
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 
-app = FastAPI(title="Raj Video Zone API")
+app = FastAPI(title="Raj Video Zone")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = "https://raj-video-zone.onrender.com/telegram-webhook"
+
+latest_video_data = None
+
+
+async def telegram_call(method, payload):
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+            json=payload
+        )
+        return response.json()
+
 
 @app.get("/")
 def home():
@@ -13,6 +26,7 @@ def home():
         "status": "Backend Running"
     }
 
+
 @app.get("/health")
 def health():
     return {
@@ -20,82 +34,92 @@ def health():
         "bot_configured": bool(BOT_TOKEN)
     }
 
+
 @app.get("/telegram-check")
 async def telegram_check():
     if not BOT_TOKEN:
         return {"status": "BOT_TOKEN missing"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
         )
 
-    data = response.json()
+    return response.json()
 
-    if data.get("ok"):
-        return {
-            "status": "Connected",
-            "bot_username": data["result"]["username"]
-        }
 
-    return {"status": "Connection failed"}
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    global latest_video_data
 
-@app.get("/latest-video")
-async def latest_video():
-    if not BOT_TOKEN:
-        raise HTTPException(500, "BOT_TOKEN missing")
+    update = await request.json()
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    message = update.get("message") or update.get("channel_post")
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(
-            url,
-            params={"allowed_updates": '["channel_post"]'}
+    if not message:
+        return {"ok": True}
+
+    chat = message.get("chat", {})
+
+    if message.get("text", "").startswith("/start"):
+        await telegram_call(
+            "sendMessage",
+            {
+                "chat_id": chat["id"],
+                "text": "স্বাগতম! ❤️ Raj Video Zone চালু আছে।"
+            }
         )
 
-    data = response.json()
+    video = message.get("video") or message.get("document")
 
-    if not data.get("ok"):
-        return {"status": "Telegram update error"}
+    if video:
+        file_size = video.get("file_size", 0)
 
-    for update in reversed(data.get("result", [])):
-        post = update.get("channel_post", {})
-        media = post.get("video") or post.get("document")
+        latest_video_data = {
+            "status": "Video Found",
+            "channel_id": chat.get("id"),
+            "message_id": message.get("message_id"),
+            "file_id": video.get("file_id"),
+            "caption": message.get("caption", ""),
+            "file_size_bytes": file_size,
+            "file_size_MB": round(file_size / 1048576, 2)
+        }
 
-        if media:
-            return {
-                "status": "Video Found",
-                "channel_id": post["chat"]["id"],
-                "message_id": post["message_id"],
-                "file_id": media["file_id"],
-                "caption": post.get("caption", "")
-            }
+    return {"ok": True}
 
-    return {"status": "No video found"}
-@app.get("/video-info")
-async def video_info():
+
+@app.get("/set-webhook")
+async def set_webhook():
     if not BOT_TOKEN:
         return {"status": "BOT_TOKEN missing"}
 
     async with httpx.AsyncClient(timeout=30) as client:
-        updates = await client.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-            params={"allowed_updates": '["channel_post"]'}
+        response = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={
+                "url": WEBHOOK_URL,
+                "allowed_updates": ["message", "channel_post"]
+            }
         )
 
-        data = updates.json()
+    return response.json()
 
-        for update in reversed(data.get("result", [])):
-            post = update.get("channel_post", {})
-            video = post.get("video") or post.get("document")
 
-            if video:
-                return {
-                    "status": "Video Found",
-                    "file_size_bytes": video.get("file_size"),
-                    "file_size_MB": round(
-                        video.get("file_size", 0) / 1048576, 2
-                    )
-                }
+@app.get("/latest-video")
+async def latest_video():
+    if latest_video_data:
+        return latest_video_data
 
-    return {"status": "No video found"}
+    return {"status": "No video found yet"}
+
+
+@app.get("/video-info")
+async def video_info():
+    if latest_video_data:
+        return {
+            "status": "Video Found",
+            "file_size_bytes": latest_video_data.get("file_size_bytes"),
+            "file_size_MB": latest_video_data.get("file_size_MB")
+        }
+
+    return {"status": "No video found yet"}
