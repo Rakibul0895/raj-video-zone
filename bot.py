@@ -72,3 +72,30 @@ async def latest_video():
             }
 
     return {"status": "No video found"}
+@app.get("/video-info")
+async def video_info():
+    if not BOT_TOKEN:
+        return {"status": "BOT_TOKEN missing"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        updates = await client.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+            params={"allowed_updates": '["channel_post"]'}
+        )
+
+        data = updates.json()
+
+        for update in reversed(data.get("result", [])):
+            post = update.get("channel_post", {})
+            video = post.get("video") or post.get("document")
+
+            if video:
+                return {
+                    "status": "Video Found",
+                    "file_size_bytes": video.get("file_size"),
+                    "file_size_MB": round(
+                        video.get("file_size", 0) / 1048576, 2
+                    )
+                }
+
+    return {"status": "No video found"}
