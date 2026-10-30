@@ -1,6 +1,6 @@
 import os
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 app = FastAPI(title="Raj Video Zone API")
 
@@ -25,10 +25,10 @@ async def telegram_check():
     if not BOT_TOKEN:
         return {"status": "BOT_TOKEN missing"}
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
-
     async with httpx.AsyncClient() as client:
-        response = await client.get(url)
+        response = await client.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
+        )
 
     data = response.json()
 
@@ -39,3 +39,36 @@ async def telegram_check():
         }
 
     return {"status": "Connection failed"}
+
+@app.get("/latest-video")
+async def latest_video():
+    if not BOT_TOKEN:
+        raise HTTPException(500, "BOT_TOKEN missing")
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(
+            url,
+            params={"allowed_updates": '["channel_post"]'}
+        )
+
+    data = response.json()
+
+    if not data.get("ok"):
+        return {"status": "Telegram update error"}
+
+    for update in reversed(data.get("result", [])):
+        post = update.get("channel_post", {})
+        media = post.get("video") or post.get("document")
+
+        if media:
+            return {
+                "status": "Video Found",
+                "channel_id": post["chat"]["id"],
+                "message_id": post["message_id"],
+                "file_id": media["file_id"],
+                "caption": post.get("caption", "")
+            }
+
+    return {"status": "No video found"}
