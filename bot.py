@@ -5,121 +5,192 @@ from fastapi import FastAPI, Request
 app = FastAPI(title="Raj Video Zone")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = "https://raj-video-zone.onrender.com/telegram-webhook"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-latest_video_data = None
+TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}"
+DB = f"{SUPABASE_URL}/rest/v1/videos"
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+}
 
 
-async def telegram_call(method, payload):
+async def tg(method, data):
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{TELEGRAM}/{method}", json=data)
+        return r.json()
+
+
+async def db_get(params):
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-            json=payload
+        r = await client.get(DB, headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json()
+
+
+async def db_post(data):
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            DB,
+            headers={**HEADERS, "Prefer": "return=representation"},
+            json=data
         )
-        return response.json()
+        r.raise_for_status()
+        return r.json()
 
 
 @app.get("/")
 def home():
-    return {
-        "project": "Raj Video Zone",
-        "status": "Backend Running"
-    }
+    return {"project": "Raj Video Zone", "status": "Running"}
 
 
 @app.get("/health")
 def health():
     return {
         "status": "OK",
-        "bot_configured": bool(BOT_TOKEN)
+        "bot_configured": bool(BOT_TOKEN),
+        "database_configured": bool(SUPABASE_URL and SUPABASE_KEY)
     }
-
-
-@app.get("/telegram-check")
-async def telegram_check():
-    if not BOT_TOKEN:
-        return {"status": "BOT_TOKEN missing"}
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
-        )
-
-    return response.json()
 
 
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
-    global latest_video_data
-
     update = await request.json()
 
-    message = update.get("message") or update.get("channel_post")
+    # নতুন ভিডিও চ্যানেল থেকে Database-এ সেভ
+    post = update.get("channel_post")
 
-    if not message:
+    if post:
+        chat = post.get("chat", {})
+        video = post.get("video") or post.get("document")
+
+        if video:
+            caption = post.get("caption", "")
+            title = caption[:100] if caption else "নতুন ভিডিও"
+
+            try:
+                await db_post({
+                    "file_id": video["file_id"],
+                    "channel_id": chat["id"],
+                    "message_id": post["message_id"],
+                    "title": title,
+                    "caption": caption,
+                    "file_size_bytes": video.get("file_size", 0)
+                })
+            except Exception as e:
+                print("Database save error:", str(e))
+
         return {"ok": True}
 
-    chat = message.get("chat", {})
+    # ব্যবহারকারীর মেসেজ
+    message = update.get("message")
 
-    if message.get("text", "").startswith("/start"):
-        await telegram_call(
-            "sendMessage",
-            {
-                "chat_id": chat["id"],
-                "text": "স্বাগতম! ❤️ Raj Video Zone চালু আছে।"
-            }
-        )
+    if message:
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "")
 
-    video = message.get("video") or message.get("document")
+        if text.startswith("/start"):
+            await tg("sendMessage", {
+                "chat_id": chat_id,
+                "text": "❤️ স্বাগতম Raj Video Zone-এ!\n\nআপনার পছন্দের ভিডিও দেখতে নিচের বাটনে চাপ দিন।",
+                "reply_markup": {
+                    "inline_keyboard": [[
+                        {"text": "🎬 সব ভিডিও দেখুন", "callback_data": "videos"}
+                    ]]
+                }
+            })
 
-    if video:
-        file_size = video.get("file_size", 0)
+        return {"ok": True}
 
-        latest_video_data = {
-            "status": "Video Found",
-            "channel_id": chat.get("id"),
-            "message_id": message.get("message_id"),
-            "file_id": video.get("file_id"),
-            "caption": message.get("caption", ""),
-            "file_size_bytes": file_size,
-            "file_size_MB": round(file_size / 1048576, 2)
-        }
+    # বাটন চাপলে
+    query = update.get("callback_query")
+
+    if query:
+        data = query.get("data")
+        chat_id = query["message"]["chat"]["id"]
+
+        await tg("answerCallbackQuery", {
+            "callback_query_id": query["id"]
+        })
+
+        if data == "videos":
+            try:
+                videos = await db_get({
+                    "select": "id,title,caption",
+                    "order": "created_at.desc",
+                    "limit": "10"
+                })
+
+                if not videos:
+                    await tg("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "এখনো কোনো ভিডিও পাওয়া যায়নি।"
+                    })
+                else:
+                    buttons = []
+                    for v in videos:
+                        buttons.append([{
+                            "text": "🎬 " + (v["title"] or "ভিডিও"),
+                            "callback_data": f"video:{v['id']}"
+                        }])
+
+                    await tg("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "📽️ আপনার পছন্দের ভিডিও নির্বাচন করুন:",
+                        "reply_markup": {"inline_keyboard": buttons}
+                    })
+
+            except Exception as e:
+                print("Video list error:", str(e))
+                await tg("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": "দুঃখিত, ভিডিও তালিকা লোড হয়নি।"
+                })
+
+        elif data.startswith("video:"):
+            video_id = data.split(":")[1]
+
+            try:
+                videos = await db_get({
+                    "select": "file_id,title,caption",
+                    "id": f"eq.{video_id}",
+                    "limit": "1"
+                })
+
+                if videos:
+                    v = videos[0]
+                    await tg("sendVideo", {
+                        "chat_id": chat_id,
+                        "video": v["file_id"],
+                        "caption": v["title"],
+                        "protect_content": True
+                    })
+                else:
+                    await tg("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "ভিডিওটি পাওয়া যায়নি।"
+                    })
+
+            except Exception as e:
+                print("Video send error:", str(e))
+                await tg("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": "ভিডিও চালাতে সমস্যা হয়েছে।"
+                })
 
     return {"ok": True}
 
 
 @app.get("/set-webhook")
 async def set_webhook():
-    if not BOT_TOKEN:
-        return {"status": "BOT_TOKEN missing"}
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            json={
-                "url": WEBHOOK_URL,
-                "allowed_updates": ["message", "channel_post"]
-            }
-        )
-
-    return response.json()
-
-
-@app.get("/latest-video")
-async def latest_video():
-    if latest_video_data:
-        return latest_video_data
-
-    return {"status": "No video found yet"}
-
-
-@app.get("/video-info")
-async def video_info():
-    if latest_video_data:
-        return {
-            "status": "Video Found",
-            "file_size_bytes": latest_video_data.get("file_size_bytes"),
-            "file_size_MB": latest_video_data.get("file_size_MB")
-        }
-
-    return {"status": "No video found yet"}
+    return await tg("setWebhook", {
+        "url": "https://raj-video-zone.onrender.com/telegram-webhook",
+        "allowed_updates": [
+            "message",
+            "channel_post",
+            "callback_query"
+        ]
+    })
