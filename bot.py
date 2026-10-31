@@ -6,7 +6,7 @@ app = FastAPI(title="Raj Video Zone")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").replace("\n", "").replace("\r", "").strip()
 
 TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DB = f"{SUPABASE_URL}/rest/v1/videos"
